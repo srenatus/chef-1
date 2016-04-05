@@ -138,6 +138,10 @@ func createServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(checkHeader))
 }
 
+func createServerWithToken(token string) *httptest.Server {
+	return httptest.NewServer(checkHeaderToken(token))
+}
+
 // publicKeyFromString parses an RSA public key from a string
 func publicKeyFromString(key []byte) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode(key)
@@ -325,6 +329,21 @@ func checkHeader(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func checkHeaderToken(token string) http.HandlerFunc {
+	return func(rw http.ResponseWriter, req *http.Request) {
+		user_id := req.Header.Get("X-OPS-USERID")
+		// see checkHeader
+		if user_id != userid {
+			fmt.Fprintf(rw, "Failed to authenticate as %s", user_id)
+		}
+
+		auth := req.Header.Get("Authorization")
+		if auth != "Bearer my-access-token" {
+			fmt.Fprintln(rw, "Could not find authorization bearer token")
+		}
+	}
+}
+
 func TestRequest(t *testing.T) {
 	ac, err := makeAuthConfig()
 	server := createServer()
@@ -356,7 +375,35 @@ func TestRequest(t *testing.T) {
 	if bodyStr != "" {
 		t.Error(bodyStr)
 	}
+}
 
+func TestRequestWithToken(t *testing.T) {
+	server := createServerWithToken("my-access-token")
+	defer server.Close()
+	setup()
+	defer teardown()
+
+	at := &AuthToken{Token: "my-access-token"}
+	request, err := client.NewRequest("GET", server.URL, nil)
+	at.Apply(request)
+
+	client := &http.Client{}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Error("Non 200 return code: " + response.Status)
+	}
+
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(response.Body)
+	bodyStr := buf.String()
+
+	if bodyStr != "" {
+		t.Error(bodyStr)
+	}
 }
 
 func TestRequestToEndpoint(t *testing.T) {
@@ -503,8 +550,9 @@ func TestNewClient(t *testing.T) {
 		t.Error("Couldn't make a valid client...\n", err)
 	}
 	// simple validation on the created client
-	if c.Auth.ClientName != "testclient" {
-		t.Error("unexpected client name: ", c.Auth.ClientName)
+	authConfig := c.Auth.(*AuthConfig)
+	if authConfig.ClientName != "testclient" {
+		t.Error("unexpected client name: ", authConfig.ClientName)
 	}
 
 	// Bad PEM should be an error
@@ -519,6 +567,36 @@ func TestNewClient(t *testing.T) {
 	c, err = NewClient(cfg)
 	if err == nil {
 		t.Error("Built a client from a bad key string")
+	}
+}
+
+func TestNewClientWithToken(t *testing.T) {
+	cfg := &Config{Name: "testclient", Token: "my-access-token"}
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Error("Couldn't make a valid client...\n", err)
+	}
+	// simple validation
+	authToken, ok := c.Auth.(*AuthToken)
+	if !ok {
+		t.Errorf("Not using token auth, auth is %#v", c.Auth)
+	}
+	if authToken.Token != "my-access-token" {
+		t.Error("Unexpected token: ", authToken.Token)
+	}
+
+	// Token takes precendence over private key based auth
+	cfg = &Config{Name: "blah", Token: "my-access-token", Key: privateKey}
+	c, err = NewClient(cfg)
+	if err != nil {
+		t.Error("Couldn't make a valid client...\n", err)
+	}
+	authToken, ok = c.Auth.(*AuthToken)
+	if !ok {
+		t.Errorf("Not giving token auth precendence, auth is %#v", c.Auth)
+	}
+	if authToken.Token != "my-access-token" {
+		t.Error("Unexpected token: ", authToken.Token)
 	}
 }
 

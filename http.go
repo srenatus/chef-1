@@ -26,6 +26,10 @@ type Body struct {
 	io.Reader
 }
 
+type Auth interface {
+	Apply(*http.Request) error
+}
+
 // AuthConfig representing a client and a private key used for encryption
 //  This is embedded in the Client type
 type AuthConfig struct {
@@ -33,9 +37,22 @@ type AuthConfig struct {
 	ClientName string
 }
 
+func (ac *AuthConfig) Apply(req *http.Request) error {
+	return ac.SignRequest(req)
+}
+
+type AuthToken struct {
+	Token string
+}
+
+func (at *AuthToken) Apply(req *http.Request) error {
+	req.Header.Set("Authorization", "Bearer "+at.Token)
+	return nil
+}
+
 // Client is vessel for public methods used against the chef-server
 type Client struct {
-	Auth    *AuthConfig
+	Auth    Auth
 	BaseURL *url.URL
 	client  *http.Client
 
@@ -57,6 +74,9 @@ type Config struct {
 
 	// This is the plain text private Key for the user
 	Key string
+
+	// This is the user's access token. If this is specified, a client created with NewClient will use token-based authentication.
+	Token string
 
 	// BaseURL is the chef server URL used to connect too. Is using orgs you should include your org in the url
 	BaseURL string
@@ -118,11 +138,22 @@ func (r *ErrorResponse) Error() string {
 
 // NewClient is the client generator used to instantiate a client for talking to a chef-server
 // It is a simple constructor for the Client struct intended as a easy interface for issuing
-// signed requests
+// authenticated requests
 func NewClient(cfg *Config) (*Client, error) {
-	pk, err := PrivateKeyFromString([]byte(cfg.Key))
-	if err != nil {
-		return nil, err
+	var auth Auth
+	if cfg.Token == "" {
+		pk, err := PrivateKeyFromString([]byte(cfg.Key))
+		if err != nil {
+			return nil, err
+		}
+		auth = &AuthConfig{
+			PrivateKey: pk,
+			ClientName: cfg.Name,
+		}
+	} else {
+		auth = &AuthToken{
+			Token: cfg.Token,
+		}
 	}
 
 	baseUrl, _ := url.Parse(cfg.BaseURL)
@@ -132,10 +163,7 @@ func NewClient(cfg *Config) (*Client, error) {
 	}
 
 	c := &Client{
-		Auth: &AuthConfig{
-			PrivateKey: pk,
-			ClientName: cfg.Name,
-		},
+		Auth: auth,
 		client: &http.Client{
 			Transport: tr,
 			Timeout:   cfg.Timeout * time.Second,
@@ -202,8 +230,11 @@ func (c *Client) NewRequest(method string, requestUrl string, body io.Reader) (*
 	// Calculate the body hash
 	req.Header.Set("X-Ops-Content-Hash", myBody.Hash())
 
-	// don't have to check this works, signRequest only emits error when signing hash is not valid, and we baked that in
-	c.Auth.SignRequest(req)
+	// don't have to check this works, since token-based authentication's Apply()
+	// doesn't failt and in this case, signRequest only emits error when signing
+	// hash is not valid, and we baked that in
+	c.Auth.Apply(req)
+
 	return req, nil
 }
 
